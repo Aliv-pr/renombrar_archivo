@@ -25,17 +25,56 @@ PATTERN_SCREEN = re.compile(
     r'^Screenshot_(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.(png|PNG)$'
 )
 
+PATTERN_WA = re.compile(
+    r'^IMG-(\d{4})(\d{2})(\d{2})-WA\d+.*\.(jpg|jpeg|png|JPG|JPEG|PNG)$'
+)
+
+
+def normalize_prefix(prefix):
+    prefix = prefix.strip().replace(" ", "_")
+    return re.sub(r'[^\w\-]', '_', prefix, flags=re.UNICODE)
+
 
 def extract_from_name(filename):
     m = PATTERN_IMG.match(filename)
     if m:
-        return (*m.groups()[:6], m.group(7).lower())
+        return (*m.groups()[:6], m.group(7).lower(), "name")
 
     m = PATTERN_SCREEN.match(filename)
     if m:
-        return (*m.groups()[:6], m.group(7).lower())
+        return (*m.groups()[:6], m.group(7).lower(), "name")
+
+    m = PATTERN_WA.match(filename)
+    if m:
+        y, mo, d, ext = m.groups()
+        return (y, mo, d, "00", "00", "00", ext.lower(), "wa")
 
     return None
+
+
+def extract_from_custom_pattern(filename, pattern, date_format):
+    if not pattern:
+        return None
+
+    m = re.search(pattern, filename)
+    if not m:
+        return None
+
+    parts = m.groups()
+
+    try:
+        if date_format == "DMY":
+            d, mo, y = parts
+        elif date_format == "YMD":
+            y, mo, d = parts
+        elif date_format == "MDY":
+            mo, d, y = parts
+        else:
+            return None
+
+        return datetime(int(y), int(mo), int(d), 0, 0, 0)
+    except Exception:
+        return None
 
 
 def extract_exif_date(filepath):
@@ -62,17 +101,26 @@ def extract_fallback_date(filepath):
     return datetime.fromtimestamp(filepath.stat().st_mtime)
 
 
-def extract_date(filepath):
+def extract_date(filepath, pattern=None, date_format=None):
+    # 1. Custom pattern
+    dt = extract_from_custom_pattern(filepath.name, pattern, date_format)
+    if dt:
+        ext = filepath.suffix[1:].lower() or "dat"
+        return dt, ext, "custom"
+
+    # 2. Nombre
     name_data = extract_from_name(filepath.name)
     if name_data:
-        y, mo, d, h, mi, s, ext = name_data
-        return datetime(int(y), int(mo), int(d), int(h), int(mi), int(s)), ext, "name"
+        y, mo, d, h, mi, s, ext, src = name_data
+        return datetime(int(y), int(mo), int(d), int(h), int(mi), int(s)), ext, src
 
+    # 3. EXIF
     exif_dt = extract_exif_date(filepath)
     if exif_dt:
         ext = filepath.suffix[1:].lower() or "dat"
         return exif_dt, ext, "exif"
 
+    # 4. mtime
     ext = filepath.suffix[1:].lower() or "dat"
     return extract_fallback_date(filepath), ext, "mtime"
 
@@ -90,32 +138,23 @@ def ask_prefix(dir_path):
         choice = input("Elige una opción (1/2): ").strip()
 
         if choice == "1":
-            prefix = dir_path.name
+            return normalize_prefix(dir_path.name)
+
         elif choice == "2":
             prefix = input("Escribe el prefijo: ").strip()
             if not prefix:
                 print("El prefijo no puede estar vacío.")
                 continue
-        else:
-            print("Opción inválida.")
-            continue
+            return normalize_prefix(prefix)
 
-        # Normalizar
-        prefix = prefix.strip().replace(" ", "_")
-        prefix = re.sub(r'[^a-zA-Z0-9_]', '_', prefix)
-        return prefix
+        print("Opción inválida.")
 
 
 def ask_include_batch(non_matching_files):
     if not non_matching_files:
         return []
 
-    count = len(non_matching_files)
-    print(f"\nSe encontraron {count} archivo(s) sin patrón:")
-    for f in non_matching_files[:5]:
-        print(f"  - {f.name}")
-    if count > 5:
-        print(f"  ... y {count - 5} más.")
+    print(f"\nSe encontraron {len(non_matching_files)} archivo(s) sin patrón:")
 
     while True:
         print("\nOpciones:")
@@ -147,6 +186,12 @@ def main():
     parser.add_argument("--directory", type=str, default=".")
     parser.add_argument("--dry-run", action="store_true")
 
+    # NUEVO
+    parser.add_argument("--pattern", type=str,
+                        help="Regex para extraer fecha personalizada")
+    parser.add_argument("--date-format", choices=["DMY", "YMD", "MDY"],
+                        help="Formato de fecha del patrón")
+
     args = parser.parse_args()
 
     dir_path = Path(args.directory).resolve()
@@ -159,18 +204,15 @@ def main():
     if args.interactive:
         prefix = ask_prefix(dir_path)
     elif args.use_dirname:
-        prefix = dir_path.name
+        prefix = normalize_prefix(dir_path.name)
     elif args.prefix:
-        prefix = args.prefix
+        prefix = normalize_prefix(args.prefix)
     else:
         print("Debes definir un prefijo")
         return
 
-    prefix = prefix.strip().replace(" ", "_")
-    prefix = re.sub(r'[^a-zA-Z0-9_]', '_', prefix)
-
-    # Archivos (excluir script actual)
     script_name = Path(sys.argv[0]).name
+
     all_files = [
         f for f in dir_path.iterdir()
         if f.is_file() and f.name != script_name
@@ -193,10 +235,9 @@ def main():
 
     file_data = []
     for f in selected_files:
-        dt, ext, source = extract_date(f)
+        dt, ext, source = extract_date(f, args.pattern, args.date_format)
         file_data.append((f, dt, ext, source))
 
-    # Orden estable
     file_data.sort(key=lambda x: (x[1], x[0].name))
 
     counter = defaultdict(int)
@@ -212,7 +253,6 @@ def main():
         new_name = f"{prefix}_{fecha}_{num}.{ext}"
         new_path = dir_path / new_name
 
-        # Colisión consistente
         while new_path.exists() and new_path != f:
             counter[key] += 1
             num = counter[key]
@@ -221,22 +261,14 @@ def main():
 
         changes.append((f.name, new_name, source))
 
-    # Preview
     print(f"\nPrefijo: {prefix}")
     print(f"Total: {len(changes)} archivos\n")
 
-    if len(changes) > 10:
-        show_all = input("¿Mostrar todos los cambios? (y/n): ").lower() == "y"
-    else:
-        show_all = True
+    for orig, new, src in changes[:5]:
+        print(f"{orig} -> {new}   [{src}]")
 
-    if show_all:
-        for orig, new, src in changes:
-            print(f"{orig} -> {new}   [{src}]")
-    else:
-        for orig, new, src in changes[:5]:
-            print(f"{orig} -> {new}   [{src}]")
-        print(f"... y {len(changes) - 5} más")
+    if len(changes) > 5:
+        print(f"... y {len(changes)-5} más")
 
     if args.dry_run:
         print("\nModo simulación")
