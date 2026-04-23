@@ -102,25 +102,21 @@ def extract_fallback_date(filepath):
 
 
 def extract_date(filepath, pattern=None, date_format=None):
-    # 1. Custom pattern
     dt = extract_from_custom_pattern(filepath.name, pattern, date_format)
     if dt:
         ext = filepath.suffix[1:].lower() or "dat"
         return dt, ext, "custom"
 
-    # 2. Nombre
     name_data = extract_from_name(filepath.name)
     if name_data:
         y, mo, d, h, mi, s, ext, src = name_data
         return datetime(int(y), int(mo), int(d), int(h), int(mi), int(s)), ext, src
 
-    # 3. EXIF
     exif_dt = extract_exif_date(filepath)
     if exif_dt:
         ext = filepath.suffix[1:].lower() or "dat"
         return exif_dt, ext, "exif"
 
-    # 4. mtime
     ext = filepath.suffix[1:].lower() or "dat"
     return extract_fallback_date(filepath), ext, "mtime"
 
@@ -139,58 +135,97 @@ def ask_prefix(dir_path):
 
         if choice == "1":
             return normalize_prefix(dir_path.name)
-
         elif choice == "2":
             prefix = input("Escribe el prefijo: ").strip()
             if not prefix:
-                print("El prefijo no puede estar vacío.")
+                print("No puede estar vacío")
                 continue
             return normalize_prefix(prefix)
 
-        print("Opción inválida.")
+        print("Opción inválida")
 
 
-def ask_include_batch(non_matching_files):
-    if not non_matching_files:
+def build_pattern(prefix, date_format, location):
+    if date_format == "DMY":
+        date_regex = r"(\d{2})-(\d{2})-(\d{4})"
+    elif date_format == "YMD":
+        date_regex = r"(\d{4})-(\d{2})-(\d{2})"
+    elif date_format == "MDY":
+        date_regex = r"(\d{2})-(\d{2})-(\d{4})"
+    else:
+        return None
+
+    if not prefix:
+        return date_regex
+
+    if location == 'after':
+        # permite separadores entre medio
+        return rf"{re.escape(prefix)}.*?{date_regex}"
+    else:
+        return rf"{date_regex}"
+
+
+def ask_custom_pattern():
+    use = input("\n¿Los archivos tienen un patrón específico? (y/n): ").lower()
+    if use != 'y':
+        return None, None
+
+    prefix = input("Prefijo esperado (ej: kelly) o vacío: ").strip()
+
+    print("\nFormato de fecha:")
+    print("1) DD-MM-YYYY")
+    print("2) YYYY-MM-DD")
+    print("3) MM-DD-YYYY")
+
+    fmt = input("Elige: ").strip()
+    fmt_map = {"1": "DMY", "2": "YMD", "3": "MDY"}
+    date_format = fmt_map.get(fmt)
+
+    if not date_format:
+        return None, None
+
+    print("\n¿Dónde está la fecha?")
+    print("1) Después del prefijo")
+    print("2) En cualquier parte")
+
+    loc = input("Elige: ").strip()
+    location = 'after' if loc == '1' else 'anywhere'
+
+    pattern = build_pattern(prefix, date_format, location)
+
+    print(f"\nPatrón generado: {pattern}")
+    return pattern, date_format
+
+
+def ask_include_batch(files):
+    if not files:
         return []
 
-    print(f"\nSe encontraron {len(non_matching_files)} archivo(s) sin patrón:")
+    print(f"\n{len(files)} archivos sin patrón detectado")
 
-    while True:
-        print("\nOpciones:")
-        print("  [t] Incluir TODOS")
-        print("  [n] No incluir ninguno")
-        print("  [i] Elegir uno por uno")
+    choice = input("[t] todos / [n] ninguno / [i] individual: ").lower()
 
-        choice = input("Opción (t/n/i): ").strip().lower()
+    if choice == 't':
+        return files
+    if choice == 'n':
+        return []
 
-        if choice == 't':
-            return non_matching_files
-        elif choice == 'n':
-            return []
-        elif choice == 'i':
-            selected = []
-            for f in non_matching_files:
-                if input(f"¿Incluir '{f.name}'? (y/n): ").lower() == 'y':
-                    selected.append(f)
-            return selected
-
-        print("Opción inválida.")
+    selected = []
+    for f in files:
+        if input(f"Incluir {f.name}? (y/n): ").lower() == 'y':
+            selected.append(f)
+    return selected
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--prefix")
     parser.add_argument("--use-dirname", action="store_true")
-    parser.add_argument("--prefix", type=str)
-    parser.add_argument("--directory", type=str, default=".")
+    parser.add_argument("--directory", default=".")
     parser.add_argument("--dry-run", action="store_true")
-
-    # NUEVO
-    parser.add_argument("--pattern", type=str,
-                        help="Regex para extraer fecha personalizada")
-    parser.add_argument("--date-format", choices=["DMY", "YMD", "MDY"],
-                        help="Formato de fecha del patrón")
+    parser.add_argument("--pattern")
+    parser.add_argument("--date-format")
 
     args = parser.parse_args()
 
@@ -200,7 +235,6 @@ def main():
         print("Directorio inválido")
         return
 
-    # Prefijo
     if args.interactive:
         prefix = ask_prefix(dir_path)
     elif args.use_dirname:
@@ -208,85 +242,52 @@ def main():
     elif args.prefix:
         prefix = normalize_prefix(args.prefix)
     else:
-        print("Debes definir un prefijo")
+        print("Define prefijo")
         return
+
+    pattern = args.pattern
+    date_format = args.date_format
+
+    if args.interactive and not pattern:
+        pattern, date_format = ask_custom_pattern()
 
     script_name = Path(sys.argv[0]).name
 
-    all_files = [
-        f for f in dir_path.iterdir()
-        if f.is_file() and f.name != script_name
-    ]
+    files = [f for f in dir_path.iterdir() if f.is_file() and f.name != script_name]
 
-    matching = []
-    non_matching = []
+    matching = [f for f in files if extract_from_name(f.name)]
+    non_matching = [f for f in files if not extract_from_name(f.name)]
 
-    for f in all_files:
-        if extract_from_name(f.name):
-            matching.append(f)
-        else:
-            non_matching.append(f)
+    selected = matching + ask_include_batch(non_matching)
 
-    selected_files = matching + ask_include_batch(non_matching)
-
-    if not selected_files:
-        print("Nada que procesar")
-        return
-
-    file_data = []
-    for f in selected_files:
-        dt, ext, source = extract_date(f, args.pattern, args.date_format)
-        file_data.append((f, dt, ext, source))
-
-    file_data.sort(key=lambda x: (x[1], x[0].name))
+    data = [(f, *extract_date(f, pattern, date_format)) for f in selected]
+    data.sort(key=lambda x: (x[1], x[0].name))
 
     counter = defaultdict(int)
     changes = []
 
-    for f, dt, ext, source in file_data:
-        fecha = format_date(dt)
-        key = (prefix, fecha)
-
+    for f, dt, ext, src in data:
+        key = (prefix, format_date(dt))
         counter[key] += 1
         num = counter[key]
 
-        new_name = f"{prefix}_{fecha}_{num}.{ext}"
-        new_path = dir_path / new_name
+        new_name = f"{prefix}_{key[1]}_{num}.{ext}"
+        changes.append((f, new_name, src))
 
-        while new_path.exists() and new_path != f:
-            counter[key] += 1
-            num = counter[key]
-            new_name = f"{prefix}_{fecha}_{num}.{ext}"
-            new_path = dir_path / new_name
-
-        changes.append((f.name, new_name, source))
-
-    print(f"\nPrefijo: {prefix}")
-    print(f"Total: {len(changes)} archivos\n")
-
-    for orig, new, src in changes[:5]:
-        print(f"{orig} -> {new}   [{src}]")
-
-    if len(changes) > 5:
-        print(f"... y {len(changes)-5} más")
+    print("\nPreview:")
+    for f, new, src in changes[:5]:
+        print(f"{f.name} -> {new} [{src}]")
 
     if args.dry_run:
-        print("\nModo simulación")
         return
 
-    if input("\n¿Aplicar cambios? (y/n): ").lower() != 'y':
-        print("Cancelado")
+    if input("\nAplicar cambios? (y/n): ") != 'y':
         return
 
-    print("\nRenombrando...")
-    for orig, new, _ in changes:
-        try:
-            (dir_path / orig).rename(dir_path / new)
-            print(f"{orig} -> {new}")
-        except Exception as e:
-            print(f"Error: {orig}: {e}")
+    for f, new, _ in changes:
+        f.rename(dir_path / new)
 
-    print("Listo.")
+    print("Listo")
 
 
 if __name__ == "__main__":
